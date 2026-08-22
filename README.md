@@ -18,14 +18,18 @@ This is a port of [iot-bedside-button](https://github.com/tangent160/iot-bedside
    WIFI_PASSWORD=your-password
    ```
    Credentials are compiled into the firmware at build time; `.env` is gitignored.
-3. Build and flash (the NanoC6 enumerates as a USB CDC device, `/dev/ttyACM0`):
+3. Build and flash:
    ```
    pio run -t upload && pio device monitor
    ```
 
    The first build downloads the ESP32-C6 toolchain (a few hundred MB) — the official `espressif32` platform does not support Arduino on the C6, so `platformio.ini` pins the [pioarduino](https://github.com/pioarduino/platform-espressif32) fork instead.
 
-   If upload fails to find the port, hold the button (GPIO9 is the BOOT strapping pin) while plugging the device in to force download mode.
+   The NanoC6 enumerates as a USB CDC device (`/dev/ttyACM*`). If you have other USB serial devices attached, name the port explicitly rather than letting autodetect choose:
+   ```
+   pio run -t upload --upload-port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_*-if00
+   ```
+   If upload can't find the device at all, hold the button (GPIO9 is the BOOT strapping pin) while plugging it in to force download mode.
 
 ## How it works
 

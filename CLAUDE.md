@@ -31,9 +31,11 @@ WiFi credentials come from `.env` (gitignored; see `.env.example`). `load_env.py
 ## Platform notes (ESP32-C6 specific)
 
 - The official `platform = espressif32` has no Arduino support for the C6. `platformio.ini` pins the [pioarduino](https://github.com/pioarduino/platform-espressif32) fork by release URL. Bump that URL deliberately, not casually — it also pins the Arduino core and ESP-IDF versions. The fork is cloned to `research/platform-espressif32/` for reference.
-- pioarduino ships no NanoC6 board definition, so `boards/m5stack-nanoc6.json` is a project-local board (PlatformIO picks up a `boards/` dir automatically). It is `esp32-c6-devkitc-1` with the flash size corrected to 4MB and `ARDUINO_USB_CDC_ON_BOOT=1` added.
-- Unverified: this port has never been built or flashed. Treat GPIO9 polarity and the USB CDC console as the first suspects for any misbehaviour.
-- Serial is native USB CDC, not a USB-UART bridge: the port is `/dev/ttyACM0` and disappears/reappears across resets. Without `ARDUINO_USB_CDC_ON_BOOT=1` there is no console output at all.
+- pioarduino ships no NanoC6 board definition, so `boards/m5stack-nanoc6.json` is a project-local board (PlatformIO picks up a `boards/` dir automatically). It is `esp32-c6-devkitc-1` with the flash size corrected to 4MB and the two USB defines added.
+- Serial is the hardware USB-Serial/JTAG peripheral, not a USB-UART bridge: the port is `/dev/ttyACM*` and disappears/reappears across resets. It needs **both** `ARDUINO_USB_CDC_ON_BOOT=1` and `ARDUINO_USB_MODE=1`. With only the first, the core aliases `Serial` to `USBSerial` — the native USB-OTG device, which the C6 does not have — and every `Serial.*` call fails to compile. Setting both makes `Serial` the HW CDC device.
+- Pick the upload port explicitly (`--upload-port`, ideally a `/dev/serial/by-id/` path). Autodetect scans all ACM devices and can pick some other USB serial gadget.
+- `pio device monitor` needs an interactive terminal; it throws in a non-TTY shell. To capture output non-interactively, read the port with pyserial (pulse DTR/RTS first to reset, or you only see steady state — the firmware logs on events, so silence is normal once it is running).
+- Verified on hardware: builds, flashes, connects to WiFi, and reaches the HS200. The **button has not been tested** — GPIO9 polarity is the first suspect if press handling misbehaves.
 
 ## Hardware facts
 
