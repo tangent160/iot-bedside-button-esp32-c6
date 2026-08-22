@@ -1,0 +1,14 @@
+# PlatformIO build output and IDE files
+.pio/
+.vscode/
+.idea/
+
+# Secrets (WiFi credentials injected at build time by load_env.py)
+.env
+
+# Reference clones of other repositories, kept locally for research only
+/research/
+
+# Local tool state
+.claude/settings.local.json
+*.bak
