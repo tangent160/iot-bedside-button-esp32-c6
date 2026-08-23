@@ -25,5 +25,18 @@ int kasaGetStatus(const IPAddress &ip, String *deviceId = nullptr);
 // Set relay state (0/1). Returns true on success.
 bool kasaSetRelay(const IPAddress &ip, int state);
 
-// Read current state and set the opposite. Returns new state (0/1) or -1 on error.
-int kasaToggle(const IPAddress &ip);
+// Returned by kasaToggle when the address answers as a different device.
+static constexpr int KASA_WRONG_DEVICE = -2;
+
+// Read current state and set the opposite. Retries the write internally (the
+// absolute target state, so a repeat can't undo a write whose reply was lost)
+// and verifies before giving up. Returns the new state (0/1), -1 on error, or
+// KASA_WRONG_DEVICE if expectedId is non-empty and the device at this address
+// reports a different, non-empty ID (e.g. the DHCP lease moved on).
+//
+// deadlineMs is an absolute millis() timestamp, checked between steps so a
+// degraded network can't chain four timeouts back to back; 0 means no limit.
+// It can only stop further steps, never abandon one already in flight, so the
+// call can still overrun by up to one command's timeout.
+int kasaToggle(const IPAddress &ip, const String &expectedId = String(),
+               uint32_t deadlineMs = 0);

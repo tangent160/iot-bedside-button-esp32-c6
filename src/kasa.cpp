@@ -5,7 +5,10 @@
 #include <WiFiUdp.h>
 
 static constexpr uint16_t KASA_PORT = 9999;
-static constexpr uint32_t TCP_TIMEOUT_MS = 3000;
+// A switch on the same LAN answers in milliseconds; if it hasn't replied in
+// 1.5s it isn't going to. Kept tight because these timeouts stack — several
+// commands can chain inside one button press, all of it blocking the main loop.
+static constexpr uint32_t TCP_TIMEOUT_MS = 1500;
 static const char SYSINFO_CMD[] = "{\"system\":{\"get_sysinfo\":{}}}";
 
 // XOR autokey cipher, initial key 171. In-place; same buffer layout for
@@ -42,8 +45,12 @@ static String kasaCommand(const IPAddress &ip, const char *json) {
   std::unique_ptr<uint8_t[]> payload(new uint8_t[len]);
   memcpy(payload.get(), json, len);
   kasaEncrypt(payload.get(), len);
-  client.write(header, 4);
-  client.write(payload.get(), len);
+  // Short writes would send a truncated ciphertext the switch never answers,
+  // costing a full read timeout for no reason. Bail out immediately instead.
+  if (client.write(header, 4) != 4 || client.write(payload.get(), len) != len) {
+    Serial.println("[kasa] short write sending command");
+    return String();
+  }
 
   uint32_t start = millis();
   while (client.available() < 4) {
@@ -69,7 +76,17 @@ static String kasaCommand(const IPAddress &ip, const char *json) {
       Serial.println("[kasa] timeout reading reply body");
       return String();
     }
-    got += client.readBytes(reply.get() + got, rlen - got);
+    size_t n = client.readBytes(reply.get() + got, rlen - got);
+    if (n == 0) {
+      // No progress: either the peer closed mid-body, or readBytes hit its own
+      // stream timeout. Retrying a closed socket just burns the timeout above.
+      if (!client.connected() && !client.available()) {
+        Serial.println("[kasa] connection closed mid-reply");
+        return String();
+      }
+      delay(10);
+    }
+    got += n;
   }
   kasaDecrypt(reply.get(), rlen);
   String result;
@@ -163,9 +180,47 @@ bool kasaSetRelay(const IPAddress &ip, int state) {
   return errCode == 0;
 }
 
-int kasaToggle(const IPAddress &ip) {
-  int current = kasaGetStatus(ip);
+// Signed comparison so the check survives a millis() wrap.
+static bool pastDeadline(uint32_t deadlineMs) {
+  return deadlineMs != 0 && (int32_t)(millis() - deadlineMs) >= 0;
+}
+
+int kasaToggle(const IPAddress &ip, const String &expectedId,
+               uint32_t deadlineMs) {
+  String seenId;
+  int current = kasaGetStatus(ip, &seenId);
+  if (current < 0 && !pastDeadline(deadlineMs)) {
+    // Reads are idempotent, so retrying one is always safe — and a dropped
+    // packet here is the common transient failure. Worth one cheap retry
+    // before the caller escalates to a blocking rediscovery.
+    Serial.println("[kasa] status read failed, retrying");
+    current = kasaGetStatus(ip, &seenId);
+  }
   if (current < 0) return -1;
+  // The status read above doubles as the identity check: refuse to flip a relay
+  // that isn't the switch we paired with. An empty seenId means the reply
+  // carried no ID at all — unknown, not proof of a different device, so treat
+  // it the same way the saved-pairing path does and let it through.
+  if (!expectedId.isEmpty() && !seenId.isEmpty() && seenId != expectedId) {
+    Serial.printf("[kasa] %s is %s, expected %s; not toggling\n",
+                  ip.toString().c_str(), seenId.c_str(), expectedId.c_str());
+    return KASA_WRONG_DEVICE;
+  }
+
+  // Retry the *absolute* target state rather than re-toggling: repeating
+  // set_relay_state is harmless, whereas a second toggle would undo a write
+  // that landed but whose reply was lost, turning a press into a no-op.
   int next = current ? 0 : 1;
-  return kasaSetRelay(ip, next) ? next : -1;
+  if (kasaSetRelay(ip, next)) return next;
+  if (pastDeadline(deadlineMs)) return -1;
+  if (kasaSetRelay(ip, next)) return next;
+  if (pastDeadline(deadlineMs)) return -1;
+
+  // Both writes went unacknowledged. One may still have taken effect, so ask
+  // the switch what it actually did before reporting failure.
+  if (kasaGetStatus(ip) == next) {
+    Serial.println("[kasa] set unacknowledged but relay is in the target state");
+    return next;
+  }
+  return -1;
 }
