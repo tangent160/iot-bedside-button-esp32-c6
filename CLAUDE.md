@@ -1,51 +1,58 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file gives guidance to Claude Code (claude.ai/code) for work on the code in this repository.
 
 ## Project
 
-Firmware for an M5Stack NanoC6 (ESP32-C6) bedside button that toggles a TP-Link Kasa HS200 (hw v2.0) light switch over the LAN. PlatformIO + Arduino framework.
+This is the firmware for an M5Stack NanoC6 (ESP32-C6) bedside button. The button toggles a TP-Link Kasa HS200 (hardware v2.0) light switch over the LAN. The project uses PlatformIO and the Arduino framework.
 
-This is a port of the Atom Lite (ESP32-PICO-D4) original. The *user-facing* behaviour is intentionally identical — same two gestures, same serial-only status — and should stay that way. The reliability internals have since diverged on purpose (per-toggle identity checks, idempotent retries, press deadlines, discovery backoff, WiFi-outage reboot); don't "resync" those to the original without reading why they changed.
+This firmware is a port of the Atom Lite (ESP32-PICO-D4) original. The user-facing behavior is the same on purpose: the same two gestures, and the same serial-only status. Keep it the same.
 
-`research/` holds read-only reference clones (the upstream project, the pioarduino platform). It is gitignored, so it is absent in a fresh checkout; re-clone as needed. Never edit anything under it.
+The reliability internals are different from the original on purpose. The differences are the identity check at each toggle, the idempotent retries, the press deadlines, the discovery backoff, and the reboot after a WiFi outage. Do not make these parts the same as the original again. First read why they changed.
 
-Third-party licenses are tracked in `ATTRIBUTIONS.md` — update it when adding or removing a dependency.
+The directory `research/` holds read-only reference clones. These clones are the upstream project and the pioarduino platform. The directory is gitignored, thus it is not in a new checkout. Clone it again if you need it. Never edit a file under this directory.
+
+## Documentation files
+
+- `LICENSE.md` holds the MIT license of this project. The upstream project is in the public domain under the Unlicense, thus the material from it stays in the public domain.
+- `THIRD-PARTY-NOTICES.md` records the third-party licenses. If you add a dependency or remove a dependency, update this file.
+- `CHANGELOG.md` uses the Keep a Changelog format. Put every user-visible change under `## [Unreleased]`. Do not make a version heading and do not set a release date. The user starts the version bump and makes the release.
+- `README.md` is for a human on the repository page. Keep it free of internal detail.
 
 ## Commands
 
-- `pio run` — build (requires `.env` in repo root; fails with a clear message otherwise)
-- `pio run -t upload` — flash the device (shows up as `/dev/ttyACM0`, USB CDC)
-- `pio device monitor` — serial monitor at 115200 baud
+- `pio run` — Build the firmware. The build needs `.env` in the root of the repository. If the file is absent, the build stops with a clear message.
+- `pio run -t upload` — Flash the device. The device shows as `/dev/ttyACM0` (USB CDC).
+- `pio device monitor` — Open the serial monitor at 115200 baud.
 
 ## Configuration
 
-WiFi credentials come from `.env` (gitignored; see `.env.example`). `load_env.py` is a PlatformIO pre-script that injects `WIFI_SSID` / `WIFI_PASSWORD` as compile-time defines — there is no runtime config.
+The WiFi credentials come from `.env`. This file is gitignored. `.env.example` shows the format. `load_env.py` is a PlatformIO pre-script. The script puts `WIFI_SSID` and `WIFI_PASSWORD` into the build as compile-time defines. There is no runtime configuration.
 
 ## Architecture
 
-- `src/kasa.{h,cpp}` — Kasa legacy protocol client, essentially the original: XOR "autokey" cipher (key 171), UDP broadcast discovery on port 9999 (no length prefix), TCP commands on port 9999 (4-byte big-endian length prefix). Discovery filters to models starting with `HS200`. Note: newer Kasa hardware uses the KLAP protocol, which this does not speak.
-- `src/main.cpp` — boot flow (WiFi → saved device from NVS via `Preferences` namespace `kasa`, else discover and save), button handling, 24h `ESP.restart()`.
-- Exactly two gestures, matching the original: short press toggles; a 5s hold forgets the saved device and rediscovers, firing the moment the hold passes 5s (latched, so the release doesn't also toggle). Deliberately no third gesture — a second threshold would force gestures to resolve on release instead, since the 5s action fires before a longer hold could complete.
-- `connectWifi()` blocks, so it reboots after 10 minutes of failure — but only once WiFi has connected at least once. That's a wedged radio, which a restart fixes; never having connected points at bad credentials, where rebooting fixes nothing and wipes the serial log you'd diagnose it from. Without the reboot the 24h restart is unreachable in exactly the case it exists for.
-- **Identity**: the saved `deviceId` is verified on *every* toggle, not just at boot, so a mid-uptime DHCP reassignment can't leave the button flipping a different device. `kasaToggle()` folds the check into the status read it already does and returns `KASA_WRONG_DEVICE` (-2) on a non-empty mismatch. An *empty* reported ID means "unknown", not "wrong", and is allowed through.
-- **Retries live in `kasaToggle()`, not above it.** It retries the status read once (idempotent; a dropped packet is the common transient failure), then retries the *absolute* target state and verifies before failing. `handleToggle()` therefore has no retry of its own — calling `kasaToggle()` again would re-read the state and undo a write whose reply was merely lost. It only escalates to rediscovery, then clears `paired`.
-- **Everything blocks the main loop** — the button isn't sampled and WiFi isn't checked while a Kasa command is in flight. Hence a tight 1.5s `TCP_TIMEOUT_MS`, and one `TOGGLE_BUDGET_MS` deadline per press that `handleToggle()` threads into `kasaToggle()` so its internal retries honour it too. Known gap: neither `kasaToggle()`'s *first* status read nor `kasaDiscover()`'s window is deadline-checked, so the real worst case is ~17.5s, not the ~12.5s the budget implies. Guarding those two is the fix if it ever matters.
-- **Recovery**: `handleForget()` clears NVS unconditionally and rediscovers. Every discovery window is 5s, boot included; `loop()` then retries every 10s for the first 2 minutes and every 60s after, because one 5s window is only two broadcasts and a shared power cut leaves the switch still booting. Discovery sits after the blocking WiFi-reconnect check so it never runs without a network.
-- Deliberately no sleep/low-power mode: modem sleep is disabled (`WiFi.setSleep(false)`). Status is serial-log only; also deliberately no LED code (removed from the original after reliability problems, and not reintroduced here).
+- `src/kasa.{h,cpp}` is the client for the legacy Kasa protocol. It is almost the same as the original. It uses the XOR "autokey" cipher (key 171). Discovery is a UDP broadcast on port 9999 with no length prefix. Commands go over TCP on port 9999 with a 4-byte big-endian length prefix. Discovery accepts only models with the prefix `HS200`. Newer Kasa hardware uses the KLAP protocol, which this client does not speak.
+- `src/main.cpp` holds the boot flow, the button handling, and the 24h `ESP.restart()`. The boot flow connects to WiFi. Then it reads the saved device from NVS with `Preferences` in the namespace `kasa`. If there is no saved device, it discovers one and saves it.
+- There are exactly two gestures, as in the original. A short press toggles the light. A hold of 5s makes the firmware forget the saved device and discover again. This action starts at the moment the hold passes 5s. The action is latched, thus the release does not also toggle. There is no third gesture, on purpose. A second threshold makes all gestures resolve on release, because the 5s action starts before a longer hold can complete.
+- `connectWifi()` blocks. Thus it reboots the device after 10 minutes of failure, but only after WiFi connected one time or more. A failure after a good connection is a wedged radio, and a restart repairs it. A failure with no good connection points to bad credentials. A reboot repairs nothing in this condition, and it erases the serial log that you need for the diagnosis. Without this reboot, the 24h restart is out of reach in the exact condition that it exists for.
+- **Identity**: the firmware makes a check of the saved `deviceId` at every toggle, not only at boot. Thus a DHCP reassignment in mid-uptime cannot make the button flip a different device. `kasaToggle()` puts this check into the status read that it already does. It returns `KASA_WRONG_DEVICE` (-2) on a mismatch that is not empty. An empty device ID means "unknown", not "wrong", and the code lets it through.
+- **The retries are in `kasaToggle()`, not above it.** The function retries the status read one time. The read is idempotent, and a lost packet is the usual transient failure. Then it retries the absolute target state and makes sure that the state is correct before it reports a failure. Thus `handleToggle()` has no retry of its own. A second call to `kasaToggle()` reads the state again and reverses a write whose reply was only lost. `handleToggle()` only escalates to discovery, and then clears `paired`.
+- **All operations block the main loop.** The firmware does not sample the button and does not look at WiFi while a Kasa command is in flight. For this reason `TCP_TIMEOUT_MS` is a tight 1.5s. There is also one `TOGGLE_BUDGET_MS` deadline per press. `handleToggle()` passes this deadline into `kasaToggle()`, thus the internal retries obey it too. There is a known gap: the deadline does not cover the first status read in `kasaToggle()`, and it does not cover the window in `kasaDiscover()`. Thus the true worst case is approximately 17.5s, not the approximately 12.5s of the budget. If this becomes a problem, the fix is a deadline check in these two places.
+- **Recovery**: `handleForget()` erases NVS always, and then discovers again. Every discovery window is 5s, and the window at boot is the same. Then `loop()` retries every 10s for the first 2 minutes, and every 60s after that time. One 5s window is only two broadcasts, and after a common power cut the switch is still in its boot sequence. Discovery comes after the blocking WiFi-reconnect check, thus it never operates without a network.
+- There is no sleep mode and no low-power mode, on purpose. Modem sleep is off (`WiFi.setSleep(false)`). The status goes only to the serial log. There is also no LED code, on purpose. The original had LED code, but it was removed after reliability problems, and it is not here again.
 
 ## Platform notes (ESP32-C6 specific)
 
-- The official `platform = espressif32` has no Arduino support for the C6. `platformio.ini` pins the [pioarduino](https://github.com/pioarduino/platform-espressif32) fork by release URL. Bump that URL deliberately, not casually — it also pins the Arduino core and ESP-IDF versions. The fork is cloned to `research/platform-espressif32/` for reference.
-- pioarduino ships no NanoC6 board definition, so `boards/m5stack-nanoc6.json` is a project-local board (PlatformIO picks up a `boards/` dir automatically). It is `esp32-c6-devkitc-1` with the flash size corrected to 4MB and the two USB defines added.
-- Serial is the hardware USB-Serial/JTAG peripheral, not a USB-UART bridge: the port is `/dev/ttyACM*` and disappears/reappears across resets. It needs **both** `ARDUINO_USB_CDC_ON_BOOT=1` and `ARDUINO_USB_MODE=1`. With only the first, the core aliases `Serial` to `USBSerial` — the native USB-OTG device, which the C6 does not have — and every `Serial.*` call fails to compile. Setting both makes `Serial` the HW CDC device. `setup()` waits up to 2s for the host to enumerate it, otherwise the boot log is gone before a monitor can attach; the wait is bounded so headless power-on still proceeds.
-- Pick the upload port explicitly (`--upload-port`, ideally a `/dev/serial/by-id/` path). Autodetect scans all ACM devices and can pick some other USB serial gadget.
-- `pio device monitor` needs an interactive terminal; it throws in a non-TTY shell. To capture output non-interactively, read the port with pyserial (pulse DTR/RTS first to reset, or you only see steady state — the firmware logs on events, so silence is normal once it is running).
-- Verified end to end on hardware — builds, flashes, connects to WiFi, reaches the HS200, and both gestures work — but that was **before** the reliability rework above (retries, deadlines, 1.5s timeout, backoff, forget-on-hold). None of that has run on the device yet; re-test both gestures plus one deliberate failure case (toggle with the switch unplugged) after the next flash.
+- The official `platform = espressif32` has no Arduino support for the C6. `platformio.ini` pins the [pioarduino](https://github.com/pioarduino/platform-espressif32) fork by its release URL. This URL also pins the Arduino core version and the ESP-IDF version. Change the URL only with intention. The fork is cloned to `research/platform-espressif32/` for reference.
+- pioarduino has no board definition for the NanoC6. Thus `boards/m5stack-nanoc6.json` is a board that is local to the project. PlatformIO finds a `boards/` directory automatically. The definition is `esp32-c6-devkitc-1` with a corrected flash size of 4MB and the two USB defines added.
+- The serial port is the hardware USB-Serial/JTAG peripheral, not a USB-UART bridge. Thus the port is `/dev/ttyACM*`, and it goes away and comes back across a reset. It needs **both** `ARDUINO_USB_CDC_ON_BOOT=1` and `ARDUINO_USB_MODE=1`. With only the first define, the core makes `Serial` an alias of `USBSerial`. `USBSerial` is the native USB-OTG device, which the C6 does not have, thus every `Serial.*` call fails to compile. With both defines, `Serial` is the hardware CDC device. `setup()` waits up to 2s for the host to enumerate the device. Without this wait, the boot log is gone before a monitor can attach. The wait has a limit, thus a headless power-on continues.
+- Name the upload port explicitly with `--upload-port`. Use a `/dev/serial/by-id/` path if you can. Autodetect scans all ACM devices and can pick a different USB serial device.
+- `pio device monitor` needs an interactive terminal. In a shell that is not a TTY, it throws. To capture the output non-interactively, read the port with pyserial. Pulse DTR and RTS first to reset the device. Without this pulse you see only the steady state, because the firmware writes the log on events. Silence is normal after the firmware runs.
+- The firmware was tested end to end on the hardware. It builds, it flashes, it connects to WiFi, it gets to the HS200, and both gestures work. But this test was **before** the reliability rework in the list above: the retries, the deadlines, the 1.5s timeout, the backoff, and forget-on-hold. None of this new code has run on the device. After the next flash, do a test of both gestures again, and one deliberate failure case: a toggle with the switch unplugged.
 
 ## Hardware facts
 
-- Board: M5Stack NanoC6 (ESP32-C6FH4, single-core RISC-V @160MHz, 4MB flash)
-- Button: GPIO9, **active low** with `INPUT_PULLUP` — note the inversion versus the Atom Lite's GPIO39. Also the BOOT strapping pin: held at reset it enters download mode.
-- M5Unified is **not** used. The original relied on it only for `M5.BtnA` debouncing; on the C6 it is a thin, less-tested layer, so `main.cpp` reads GPIO9 directly with a small debounce (`buttonUpdate()` / `buttonPressedFor()` / `buttonWasReleased()` mirror the `M5.BtnA` calls they replaced).
-- RGB LED (data GPIO20, power enable GPIO19) and the blue LED (GPIO7) exist but are intentionally unused.
+- Board: M5Stack NanoC6 (ESP32-C6FH4, single-core RISC-V at 160MHz, 4MB flash).
+- Button: GPIO9, **active low** with `INPUT_PULLUP`. This is the inverse of GPIO39 on the Atom Lite. GPIO9 is also the BOOT strapping pin. If it is held at reset, the device enters download mode.
+- The project does **not** use M5Unified. The original used it only for the debounce of `M5.BtnA`. On the C6 this library is a thin layer with less test coverage. Thus `main.cpp` reads GPIO9 directly with a small debounce. The functions `buttonUpdate()`, `buttonPressedFor()`, and `buttonWasReleased()` do the same work as the `M5.BtnA` calls that they replaced.
+- The RGB LED (data on GPIO20, power enable on GPIO19) and the blue LED (GPIO7) are on the board, but the firmware does not use them, on purpose.
